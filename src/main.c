@@ -208,6 +208,18 @@ int ignore_errors_flag = 0;
 
 int print_data_base_flag = 0;
 
+/* Nonzero means don't remake anything, just print the dependency graph
+   that results from reading the makefile (-g).  */
+
+int print_graph_flag = 0;
+
+/* Nonzero means print time stamps for start and finish for each of the
+   targets in the makefile. */
+static struct stringlist *profile_option = 0;
+
+/* Structure keeping the function call list used to print profiling info */
+prof_info *prif_start = 0;
+
 /* Nonzero means don't remake anything; just return a nonzero status
    if the specified targets are not up to date (-q).  */
 
@@ -355,6 +367,9 @@ static const char *const usage[] =
   -f FILE, --file=FILE, --makefile=FILE\n\
                               Read FILE as a makefile.\n"),
     N_("\
+  -g, --graph                 Print make's internal dependency graph\n\
+                              in Graphviz format, without remaking makefiles.\n"),
+    N_("\
   -h, --help                  Print this message and exit.\n"),
     N_("\
   -i, --ignore-errors         Ignore errors from recipes.\n"),
@@ -381,6 +396,10 @@ static const char *const usage[] =
                               Synchronize output of parallel jobs by TYPE.\n"),
     N_("\
   -p, --print-data-base       Print make's internal database.\n"),
+    N_("\
+  -P[FMT], --profile[=FMT], --profile-format[=FMT]\n\
+                              Print profiling information for each target\n\
+                              using the format 'FMT'.\n"),
     N_("\
   -q, --question              Run no recipe; exit status says if up to date.\n"),
     N_("\
@@ -425,6 +444,7 @@ static const struct command_switch switches[] =
     { 'D', flag, &suspend_flag, 1, 1, 0, 0, 0, "suspend-for-debug" },
 #endif
     { 'e', flag, &env_overrides, 1, 1, 0, 0, 0, "environment-overrides", },
+    { 'g', flag, &print_graph_flag, 1, 1, 0, 0, 0, "graph" },
     { 'E', strlist, &eval_strings, 1, 0, 0, 0, 0, "eval" },
     { 'h', flag, &print_usage_flag, 0, 0, 0, 0, 0, "help" },
     { 'i', flag, &ignore_errors_flag, 1, 1, 0, 0, 0, "ignore-errors" },
@@ -456,6 +476,8 @@ static const struct command_switch switches[] =
       &default_load_average, "load-average" },
     { 'o', filename, &old_files, 0, 0, 0, 0, 0, "old-file" },
     { 'O', string, &output_sync_option, 1, 1, 0, "target", 0, "output-sync" },
+    { 'P', strlist, &profile_option, 1, 1, 0, "[PROF:%N:lvl=%L:pid=%P] %S;%E;%D",
+       0, "profile" },
     { 'W', filename, &new_files, 0, 0, 0, 0, 0, "what-if" },
 
     /* These are long-style options.  */
@@ -484,6 +506,7 @@ static struct option long_option_aliases[] =
     { "max-load",       optional_argument,      0, 'l' },
     { "dry-run",        no_argument,            0, 'n' },
     { "recon",          no_argument,            0, 'n' },
+    { "profile-format", optional_argument,      0, 'P' },
     { "makefile",       required_argument,      0, 'f' },
   };
 
@@ -802,6 +825,130 @@ decode_output_sync_flags (void)
   if (sync_mutex)
     RECORD_SYNC_MUTEX (sync_mutex);
 #endif
+}
+
+static const char *
+profile_marker_index(const char *s, int *found)
+{
+  char *ix;
+  const char *ps, *pe;
+
+  *found = 0;
+
+  /* consume all literal strings and '%%' */
+  for (ps = 0; (!ps) || (ix && (*(ix+1) == '%')); ps = ix+2)
+    {
+      if (!ps) ps = s;
+      ix = index(ps, '%');
+      if (ix)
+        {
+          pe = ix;
+          if (*(ix+1) == '\0')
+            {
+              /* XXX: Is this better than returning an error? */
+              *ix = '\0';
+              ix = 0;
+            }
+          else
+            *found = (*(ix+1) != '%');
+        }
+      else
+        {
+          pe = index(ps,'\0');
+        }
+    }
+
+  return pe;
+}
+
+static void
+decode_profile_format (void)
+{
+  const char **pp;
+
+  prof_info **pprif = &prif_start;
+  int found;
+
+  if (!profile_option)
+    return;
+
+  /* Turn the profile format string into a printf format string and list of
+     functions to call to get the values of the parameters for the final
+     string.  */
+
+  for (pp=profile_option->list; *pp; ++pp)
+    {
+      const char *p = *pp;
+      const char *pe;
+
+      do
+        {
+          pe = profile_marker_index(p, &found);
+          /* store literal string */
+          if (p < pe)
+            {
+              /* add the literal string between p and pe */
+              *pprif = calloc(sizeof(prof_info), 1);
+              (*pprif)->fmt = xstrndup(p, (unsigned int)(pe-p));
+              (*pprif)->info_func = prof_print_str;
+              pprif = &((*pprif)->next);
+            }
+          if (found)
+            {
+              prof_info_func_t pfunc = 0;
+              switch (*(pe+1))
+                {
+                  case 'N': pfunc = prof_print_name; pe+=2; break;
+                  case 'L': pfunc = prof_print_level; pe+=2; break;
+                  case 'P': pfunc = prof_print_pid; pe+=2; break;
+                  case 'S': pfunc = prof_print_invokets; pe+=2; break;
+                  case 'E': pfunc = prof_print_finishts; pe+=2; break;
+                  case 'D': pfunc = prof_print_diff; pe+=2; break;
+                  default :
+                            {
+                                char ch[2];
+                                ch[0]=pe[1];
+                                ch[1]='\0';
+                    OS(fatal, NILF,
+                        _("unknown profile information specifier '%s'"),
+                        ch);
+                            }
+                    break;
+                }
+              *pprif = calloc(sizeof(prof_info), 1);
+              (*pprif)->info_func = pfunc;
+              pprif = &((*pprif)->next);
+            }
+          p = pe;
+        }
+      while (*p);
+    }
+}
+
+static void
+free_prof_sublist(prof_info *prof_slist)
+{
+  if (prof_slist)
+    {
+      free_prof_sublist(prof_slist->next);
+      prof_slist->next = 0;
+      if (prof_slist->fmt) free((void*)prof_slist->fmt);
+      prof_slist->fmt = 0;
+      prof_slist->info_func = 0;
+      free(prof_slist);
+    }
+}
+
+static void
+clean_profile_list(void)
+{
+  prof_info **pprif;
+
+  if (!profile_option)
+    return;
+
+  pprif = &prif_start;
+  free_prof_sublist(*pprif);
 }
 
 #ifdef WINDOWS32
@@ -2263,7 +2410,10 @@ main (int argc, char **argv, char **envp)
           db_level = DB_NONE;
 
         rebuilding_makefiles = 1;
-        status = update_goal_chain (read_files);
+        if (print_graph_flag)
+          status = -1;
+        else
+          status = update_goal_chain (read_files);
         rebuilding_makefiles = 0;
 
         db_level = orig_db_level;
@@ -2589,28 +2739,34 @@ main (int argc, char **argv, char **envp)
   DB (DB_BASIC, (_("Updating goal targets....\n")));
 
   {
-    switch (update_goal_chain (goals))
-    {
-      case us_none:
-        /* Nothing happened.  */
-        /* FALLTHROUGH */
-      case us_success:
-        /* Keep the previous result.  */
-        break;
-      case us_question:
-        /* We are under -q and would run some commands.  */
-        makefile_status = MAKE_TROUBLE;
-        break;
-      case us_failed:
-        /* Updating failed.  POSIX.2 specifies exit status >1 for this; */
-        makefile_status = MAKE_FAILURE;
-        break;
-    }
+    if (print_graph_flag)
+      makefile_status=0;
+    else
+      {
+        switch (update_goal_chain (goals))
+        {
+          case us_none:
+            /* Nothing happened.  */
+            /* FALLTHROUGH */
+          case us_success:
+            /* Keep the previous result.  */
+            break;
+          case us_question:
+            /* We are under -q and would run some commands.  */
+            makefile_status = MAKE_TROUBLE;
+            break;
+          case us_failed:
+            /* Updating failed.  POSIX.2 specifies exit status >1 for this;
+               but in VMS, there is only success and failure.  */
+            makefile_status = MAKE_FAILURE;
+            break;
+        }
 
-    /* If we detected some clock skew, generate one last warning */
-    if (clock_skew_detected)
-      O (error, NILF,
-         _("warning:  Clock skew detected.  Your build may be incomplete."));
+        /* If we detected some clock skew, generate one last warning */
+        if (clock_skew_detected)
+          O (error, NILF,
+                 _("warning:  Clock skew detected.  Your build may be incomplete."));
+      }
 
     /* Exit.  */
     die (makefile_status);
@@ -2619,7 +2775,7 @@ main (int argc, char **argv, char **envp)
   /* NOTREACHED */
   exit (MAKE_SUCCESS);
 }
-
+
 /* Parsing of arguments, decoding of switches.  */
 
 static char options[1 + sizeof (switches) / sizeof (switches[0]) * 3];
@@ -3011,6 +3167,7 @@ decode_switches (int argc, const char **argv, int env)
   /* If there are any options that need to be decoded do it now.  */
   decode_debug_flags ();
   decode_output_sync_flags ();
+  decode_profile_format ();
 }
 
 /* Decode switches from environment variable ENVAR (which is LEN chars long).
@@ -3082,7 +3239,7 @@ decode_env_switches (const char *envar, size_t len)
   /* Parse those words.  */
   decode_switches (argc, argv, 1);
 }
-
+
 /* Quote the string IN so that it will be interpreted as a single word with
    no magic by decode_env_switches; also double dollar signs to avoid
    variable expansion in make itself.  Write the result into OUT, returning
@@ -3342,7 +3499,7 @@ define_makeflags (int all, int makefile)
   return define_variable_cname ("MAKEFLAGS", flagstring,
                                 env_overrides ? o_env_override : o_file, 1);
 }
-
+
 /* Print version information.  */
 
 static void
@@ -3350,7 +3507,7 @@ print_version (void)
 {
   static int printed_version = 0;
 
-  const char *precede = print_data_base_flag ? "# " : "";
+  const char *precede = (print_data_base_flag||print_graph_flag) ? "# " : "";
 
   if (printed_version)
     /* Do it only once.  */
@@ -3442,7 +3599,7 @@ clean_jobserver (int status)
       reset_jobserver ();
     }
 }
-
+
 /* Exit with STATUS, cleaning up as necessary.  */
 
 void
@@ -3473,9 +3630,16 @@ die (int status)
       if (print_data_base_flag)
         print_data_base ();
 
+      if (print_graph_flag)
+        print_graph ();
+
+      if (profile_option)
+        print_targets_update_time ();
+
       if (verify_flag)
         verify_file_data_base ();
 
+      clean_profile_list();
       clean_jobserver (status);
 
       if (output_context)

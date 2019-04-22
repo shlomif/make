@@ -208,7 +208,7 @@ enter_file (const char *name)
 
   return new;
 }
-
+
 /* Rehash FILE to NAME.  This is not as simple as resetting
    the 'hname' member, since it must be put in a new hash bucket,
    and possibly merged with an existing file called NAME.  */
@@ -355,7 +355,7 @@ rename_file (struct file *from_file, const char *to_hname)
       from_file = from_file->prev;
     }
 }
-
+
 /* Remove all nonprecious intermediate files.
    If SIG is nonzero, this was caused by a fatal signal,
    meaning that a different message will be printed, and
@@ -803,7 +803,7 @@ set_command_state (struct file *file, enum cmd_state state)
     if (state > d->file->command_state)
       d->file->command_state = state;
 }
-
+
 /* Convert an external file timestamp to internal form.  */
 
 FILE_TIMESTAMP
@@ -827,7 +827,7 @@ file_timestamp_cons (const char *fname, time_t stamp, long int ns)
 
   return ts;
 }
-
+
 /* Return the current time as a file timestamp, setting *RESOLUTION to
    its resolution.  */
 FILE_TIMESTAMP
@@ -908,7 +908,7 @@ file_timestamp_sprintf (char *p, FILE_TIMESTAMP ts)
 
   *p = '\0';
 }
-
+
 /* Print the data base of files.  */
 
 void
@@ -1058,7 +1058,242 @@ print_file_data_base (void)
   fputs (_("\n# files hash-table stats:\n# "), stdout);
   hash_print_stats (&files, stdout);
 }
-
+
+/* Dump the dependency graph to a Graphviz file (on stdout)  */
+
+void
+print_graph_prereqs (const char *filename, const struct dep *deps)
+{
+  const struct dep *ood = 0;
+
+  /* Print all normal dependencies; note any order-only deps.  */
+  for (; deps != 0; deps = deps->next)
+    if (! deps->ignore_mtime)
+      printf ("  \"%s\" -> \"%s\" [%s %s] ;\n", filename, dep_name (deps),
+              deps->changed ? "color=red": "",
+              (deps->flags & RM_DONTCARE) ? "arrowhead=empty" : "arrowhead=normal");
+
+  /* Print order-only deps, if we have any.  */
+  if (ood)
+    {
+      for (ood = ood->next; ood != 0; ood = ood->next)
+        if (ood->ignore_mtime)
+          printf ("    %s -> %s [style=dashed];\n", filename, dep_name (ood));
+          /* XXX: we need to distinguish these some how.
+           * Is dotting them the right way? */
+    }
+}
+
+static void
+print_graph_file (const void *item)
+{
+  const struct file *f = item;
+
+  int built_in_special_target=(
+       (0==strcmp(f->name,".PHONY"))
+    || (0==strcmp(f->name,".SUFFIXES"))
+    || (0==strcmp(f->name,".DEFAULT"))
+    || (0==strcmp(f->name,".PRECIOUS"))
+    || (0==strcmp(f->name,".INTERMEDIATE"))
+    || (0==strcmp(f->name,".SECONDARY"))
+    || (0==strcmp(f->name,".SECONDEXPANSION"))
+    || (0==strcmp(f->name,".DELETE_ON_ERROR"))
+    || (0==strcmp(f->name,".IGNORE"))
+    || (0==strcmp(f->name,".LOW_RESOLUTION_TIME"))
+    || (0==strcmp(f->name,".SILENT"))
+    || (0==strcmp(f->name,".EXPORT_ALL_VARIABLES"))
+    || (0==strcmp(f->name,".NOTPARALLEL"))
+    || (0==strcmp(f->name,".ONESHELL"))
+    || (0==strcmp(f->name,".POSIX"))
+    );
+  if ((f->is_target) && (!built_in_special_target))
+    {
+      printf ("  \"%s\" [", f->name);
+      /* XXX some of these should be attached to the nodes in some way;
+       * though I'm not sure what style changes should be made for which ones.
+       *  ~ LukeShu*/
+      if (f->double_colon)   printf (" shape=tripleoctagon");
+      if (f->precious)       printf (" fontcolor=red");
+      if (f->phony)          printf (" style=dashed color=blue");
+      else                   printf (" style=filled fillcolor=green");
+      if (f->cmd_target)     printf (" shape=diamond root");
+      if (f->dontcare)       printf (" shape=parallelogram");
+      if (f->tried_implicit) printf (" shape=underline");
+      if (f->intermediate)   printf (" style=dotted color=yellow");
+      #if 0
+      if (f->stem != 0)      printf (" shape=box3d label=\"\\N (%s)\"", f->stem); /* Implicit/static pattern stem: f->stem */
+      if (f->also_make != 0)
+        {
+          const struct dep *d;
+          fputs (_("#  Also makes:"), stdout);
+          for (d = f->also_make; d != 0; d = d->next)
+          printf (" %s\n", dep_name (d));
+        }
+           if (f->last_mtime == UNKNOWN_MTIME)     puts (_("// Modification time never checked."));
+      else if (f->last_mtime == NONEXISTENT_MTIME) puts (_("// File does not exist."));
+      else if (f->last_mtime == OLD_MTIME)         puts (_("// File is very old."));
+      else
+        {
+          char buf[FILE_TIMESTAMP_PRINT_LEN_BOUND + 1];
+          file_timestamp_sprintf (buf, f->last_mtime);
+          printf (_("// Last modified %s\n"), buf);
+        }
+      if (f->updated) puts (_("// File has been updated."));
+      else            puts (_("// File has not been updated."));
+      switch (f->command_state)
+        {
+        case cs_running:      puts (_("// Update: Running (THIS IS A BUG).")); break;
+        case cs_deps_running: puts (_("// Update: Dependencies running (THIS IS A BUG).")); break;
+        case cs_not_started:
+        case cs_finished:
+          switch (f->update_status)
+	    {
+	    case -1: break;
+	    case 0:  puts (_("// Update: Successfully")); break;
+	    case 1:  assert (question_flag);
+	             puts (_("// Update: Needs to be (-q is set)")); break;
+	    case 2:  puts (_("// Update: Failed")); break;
+	    default: puts (_("// Update: Invalid `update_status' value"));
+	            fflush (stdout);
+	            fflush (stderr);
+	            abort ();
+	    }
+          break;
+        default: puts (_("// Update: Invalid `command_state' value"));
+                 fflush (stdout);
+                 fflush (stderr);
+                 abort ();
+        }
+      if (f->variables != 0) print_file_variables (f);
+      if (f->cmds != 0) print_commands (f->cmds);
+      #endif
+      printf("];\n");
+      print_graph_prereqs (f->name, f->deps);
+    }
+
+  if (f->prev)
+    print_graph_file ((const void *) f->prev);
+}
+
+void
+print_graph (void)
+{
+  printf ("%sgraph make%i {\n",
+          (makelevel==0)?"di":"sub",
+          getpid());
+  hash_map (&files, print_graph_file);
+  puts ("}");
+}
+
+static double
+invoke_time(const struct file *f)
+{
+  double invoked_time_in_mill = (f->t_invoked.tv_sec) * 1000 +
+            (f->t_invoked.tv_usec) / 1000;
+  return invoked_time_in_mill;
+}
+
+static double
+finish_time(const struct file *f)
+{
+  double finished_time_in_mill = (f->t_finished.tv_sec) * 1000 +
+            (f->t_finished.tv_usec) / 1000;
+  return finished_time_in_mill;
+}
+
+void
+prof_print_str (__attribute__ ((unused)) const struct file *f, char *fmt)
+{
+  fprintf (stderr, "%s", fmt);
+}
+
+void
+prof_print_name (const struct file *f, __attribute__((unused)) char *fmt)
+{
+  fprintf (stderr, "%s", f->name);
+}
+
+void
+prof_print_level (__attribute__((unused)) const struct file *f,
+    __attribute__((unused)) char *fmt)
+{
+  fprintf (stderr, "%u", makelevel);
+}
+
+void
+prof_print_pid (__attribute__((unused)) const struct file *f,
+    __attribute__((unused)) char *fmt)
+{
+  fprintf (stderr, "%d", getpid());
+}
+
+void
+prof_print_invokets (const struct file *f, __attribute__((unused)) char *fmt)
+{
+  fprintf (stderr, "%.0f", invoke_time(f));
+}
+
+void
+prof_print_finishts (const struct file *f, __attribute__((unused)) char *fmt)
+{
+  fprintf (stderr, "%.0f", finish_time(f));
+}
+
+void
+prof_print_diff (const struct file *f, __attribute__((unused)) char *fmt)
+{
+  double itime = invoke_time(f);
+  double ftime = finish_time(f);
+  fprintf (stderr, "%.0f", ftime-itime);
+}
+
+static void
+print_target_update_time (const void *item)
+{
+  const struct file *f = item;
+
+  int built_in_special_target=(
+       (0==strcmp(f->name,".PHONY"))
+    || (0==strcmp(f->name,".SUFFIXES"))
+    || (0==strcmp(f->name,".DEFAULT"))
+    || (0==strcmp(f->name,".PRECIOUS"))
+    || (0==strcmp(f->name,".INTERMEDIATE"))
+    || (0==strcmp(f->name,".SECONDARY"))
+    || (0==strcmp(f->name,".SECONDEXPANSION"))
+    || (0==strcmp(f->name,".DELETE_ON_ERROR"))
+    || (0==strcmp(f->name,".IGNORE"))
+    || (0==strcmp(f->name,".LOW_RESOLUTION_TIME"))
+    || (0==strcmp(f->name,".SILENT"))
+    || (0==strcmp(f->name,".EXPORT_ALL_VARIABLES"))
+    || (0==strcmp(f->name,".NOTPARALLEL"))
+    || (0==strcmp(f->name,".ONESHELL"))
+    || (0==strcmp(f->name,".POSIX"))
+    );
+  if ((f->is_target) && (!built_in_special_target))
+    {
+
+      double itime = invoke_time(f);
+      if (!prif_start)
+        O( fatal, NILF, _("internal error: profile option active, "
+            "but no profile print information found"));
+      if (itime)
+        {
+          prof_info *pprof;
+          for (pprof = prif_start; pprof; pprof = pprof->next)
+            {
+              pprof->info_func(f, (char *)pprof->fmt);
+            }
+          fprintf(stderr, "\n");
+        }
+    }
+}
+
+void
+print_targets_update_time (void)
+{
+  hash_map (&files, print_target_update_time);
+}
+
 /* Verify the integrity of the data base of files.  */
 
 #define VERIFY_CACHED(_p,_n) \

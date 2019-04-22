@@ -20,6 +20,7 @@ this program.  If not, see <http://www.gnu.org/licenses/>.  */
    All of these are chained together through 'next'.  */
 
 #include "hash.h"
+#include <sys/time.h>
 
 struct file
   {
@@ -76,6 +77,9 @@ struct file
         cs_finished             /* Commands finished.  */
       } command_state ENUM_BITFIELD (2);
 
+    struct timeval t_invoked;
+    struct timeval t_finished;
+
     unsigned int builtin:1;     /* True if the file is a builtin rule. */
     unsigned int precious:1;    /* Non-0 means don't delete file on quit */
     unsigned int loaded:1;      /* True if the file is a loaded object. */
@@ -105,6 +109,15 @@ struct file
 
 extern struct file *default_file;
 
+typedef void (*prof_info_func_t) (const struct file *, char *);
+typedef struct prof_info_st
+  {
+    const char *fmt; /* format string for fprintf */
+    prof_info_func_t info_func;
+    struct prof_info_st *next;
+  } prof_info;
+
+extern prof_info *prif_start;
 
 struct file *lookup_file (const char *name);
 struct file *enter_file (const char *name);
@@ -121,6 +134,16 @@ void verify_file_data_base (void);
 char *build_target_list (char *old_list);
 void print_prereqs (const struct dep *deps);
 void print_file_data_base (void);
+void print_graph (void);
+void print_targets_update_time (void);
+
+void prof_print_str (const struct file *f, char *fmt);
+void prof_print_name (const struct file *f, char *fmt);
+void prof_print_level (const struct file *f, char *fmt);
+void prof_print_pid (const struct file *f, char *fmt);
+void prof_print_invokets (const struct file *f, char *fmt);
+void prof_print_finishts (const struct file *f, char *fmt);
+void prof_print_diff (const struct file *f, char *fmt);
 int try_implicit_rule (struct file *file, unsigned int depth);
 int stemlen_compare (const void *v1, const void *v2);
 
